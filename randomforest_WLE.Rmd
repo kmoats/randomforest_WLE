@@ -1,0 +1,176 @@
+---
+title: Random Forest Analysis of the UCI Weight Lifting Exercises Dataset
+author: Kenneth Moats
+output: 
+ html_document:
+  fig_caption: true
+fontsize: 10 pt
+
+---
+
+```{r global_options, echo = FALSE}
+knitr::opts_chunk$set(fig.width = 6, fig.height = 6, fig.path = 'Figures/',
+                      echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+## Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit, it is now possible to collect a large amount of data about personal activity relatively inexpensively.  These types of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+
+The data in this project can be found at http://groupware.les.inf.puc-rio.br/har.  Six participants were asked to perform dumbbell biceps curls correctly and incorrectly in 5 different ways:  
+
+    A: exactly according to the specification  
+    B: throwing the elbows to the front  
+    C: lifting the dumbbell only halfway  
+    D: lowering the dumbbell only halfway  
+    E: throwing the hips to the front  
+
+This is the "classe" variable in the training set.  The goal of this project is to predict the manner in which they did the exercise, based on data from accelerometers on the belt, forearm, arm, and dumbell.  Any of these other variables may be used as predictors.
+
+## Load Libraries
+
+```{r}
+library(caret)
+
+# enable multi-core processing
+library(doParallel)
+#cl <- makeCluster(detectCores())
+registerDoParallel()
+set.seed(12345)
+```
+
+## Load Training and Testing Data 
+
+```{r}
+downloadfile <- function(fileurl, filename){
+        if(!file.exists(filename)) {                
+                download.file(fileurl, destfile = filename, method = "curl")
+                date_downloaded <- date()
+                }
+        read.csv(filename)
+        }
+
+traindata <- downloadfile("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "trainingdata.csv")
+testdata <- downloadfile("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "testdata.csv")
+
+```
+
+
+## Exploratory Data Analysis
+
+First we examine the training data.
+
+```{r}
+str(traindata)
+```
+
+We see that there are `r ncol(traindata)` variables in the training data set.  To reduce the number of predictors, we determine which variables contain missing values and determine the fraction of missing values for those variables.
+
+```{r}
+countnas <- function(data) {
+        sum(is.na(data))
+        }
+
+numbernas <- function(data) {
+        apply(data, MARGIN = 2, countnas)
+        }
+
+fractionnas <- function(data) {
+        numbernas(data)/nrow(data)   
+        }
+
+print(fractionnas(traindata)[which(fractionnas(traindata) > 0)])
+```
+
+
+## Data Cleaning
+Based on the above exploratory data analysis, there are several variables that contain approximately 97.9% missing values.  The following code removes these variables from both the training and testing data sets.  We also only keep variables related to the belt, forearm, arm and dumbell motion, that appear in both training and testing data sets, as we are interested in how these variables can be used to predict the classe variable (variables such as "user_name", "raw_timestamp_part1", etc..., are unlikely to affect the type of exercise).
+
+```{r}
+cleandata <- function(data){
+        data <- data[ , -which(fractionnas(data) > 0.97)]
+        data[, grep("classe|belt|arm|dumbbell",names(data))]
+        }
+
+traindata <- cleandata(traindata)
+testdata <- cleandata(testdata)
+
+traindata <- traindata[, which((names(traindata) %in% names(testdata)) | names(traindata)=="classe")]
+```
+
+
+## Create Cross Validation Data Set
+We use 60% of the training data set for training and the other 40% for cross validation
+```{r}
+inTrain <- createDataPartition(y = traindata$classe, p = 0.6, list = FALSE)
+validationdata <- traindata[-inTrain, ]
+traindata <- traindata[inTrain, ] 
+```
+
+We now check the dimensions of the training, validation and testing data sets.
+```{r}
+dim(traindata)
+dim(validationdata)
+dim(testdata)
+```
+
+We are left with `r ncol(testdata)` variables as predictors in the training, validation and testing data sets, with the classe variable as the outcome in the testing and validation sets.  The classe variable does not appear in the testing data set, as this is the variable we intend to predict.
+
+## Building a Model using the Training Data Set
+
+We choose to train a model using a random forest for several reasons.  Random forests are well suited to handle a large number of predictors, especially when the interactions between them are unknown.  Random forests also have a high accuracy rate and a built-in cross-validation component that allows an estimate of the out-of-sample error rate.  The model is built using the `r ncol(testdata)` predictors in the training set.  5-fold cross validation is used as the train control method.
+
+```{r}
+
+rfFit <- train(classe ~ ., traindata, method = "rf", trControl=trainControl(method = 'cv', number = 5), allowParallel = TRUE)
+
+print(rfFit)
+print(rfFit$finalModel)
+```
+
+The out of sample error rate using 5-fold cross validation is estimated to be 0.85%.  We found that the optimal model that maximizes the accuracy uses `r rfFit$finalModel$ntree` trees and includes `r rfFit$finalModel$mtry` predictors.  Using more than 27 predictors results in overfitting as shown below:
+
+```{r}
+plot(rfFit, main = "Accuracy as a function of predictors")
+```
+
+The importance of the predictors in the model are shown below:
+
+```{r,fig.width = 6, fig.height = 8}
+plot(varImp(rfFit), main = "Importance of Predictors")
+```
+
+
+## Assessing the Accuracy of the Model using the Validation Data Set
+
+We now assess the accuracy of our model using the validation data set.
+
+```{r}
+rfPredict <- predict(rfFit, validationdata)
+confusionMatrix(rfPredict, validationdata$classe)
+```
+
+The accuracy of the model is 99.24%, so we expect that this model predicts the outcome in the classe variable quite well.
+
+
+## Predicting the Outcome using the Testing Data Set
+
+We now predict the outcomes of the 20 cases from the testing data set.  These outcomes are printed below and each outcome is written to an output file.
+
+```{r}
+predictions <- predict(rfFit, testdata)
+print(predictions)
+
+# Generate output file for each of the 20 cases      
+pml_write_files = function(x){
+        n = length(x)
+        for(i in 1:n){
+                filename = paste0("problem_id_",i,".txt")
+                write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+        }
+}
+
+setwd("submission")
+pml_write_files(predictions)
+```
